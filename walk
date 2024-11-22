@@ -1,0 +1,112 @@
+#include "M5Unified.h"
+#include <Wire.h>
+#include <VL53L1X.h>
+
+VL53L1X sensor;
+
+void setup() {
+    Serial.begin(115200);
+    delay(500);  // シリアル通信の安定化
+
+    M5.begin();  // M5Stack Core2の初期化
+    M5.Ex_I2C.begin();  // I2C通信の初期化
+
+    // ToFセンサーの初期化
+    sensor.setBus(&Wire);
+    sensor.setTimeout(500);
+
+    if (!sensor.init()) {
+        Serial.println("Failed to initialize ToF sensor!");
+        while (1);  // 初期化失敗で停止
+    }
+
+    // 測定モードとタイミングを設定
+    sensor.setDistanceMode(VL53L1X::Short);  // 短距離モード
+    sensor.setMeasurementTimingBudget(33000);  // 測定時間33ms（必要な最小値）
+
+    // 100msごとの連続測定を開始
+    sensor.startContinuous(100);
+
+    Serial.println("Setup complete. Waiting for measurements...");
+}
+
+void loop() {
+    static unsigned long lastTime = 0;
+    static int countUP = 0, record = 0, measurementDone = 0;
+    static unsigned long recstartTime = 0;
+    static float lastDisplayTime = -0.1;  // -0.1からスタートして0秒のデータを出力
+    static float initialPosition = 0.0;
+
+    if (millis() - lastTime >= 100) {
+        lastTime = millis();
+
+        // ToFセンサーから距離データを取得
+        sensor.read();
+        float range = sensor.ranging_data.range_mm;
+
+        static float kyori1 = 0, kyori2 = 0, kyori3 = 0, kyori4 = 0, kyori5 = 0;
+
+        // スムージング処理
+        float smoothrange = (800 * range + 50 * kyori1 + 50 * kyori2 +
+                             50 * kyori3 + 25 * kyori4 + 25 * kyori5) / 1000.0;
+        float smoothrange_m = smoothrange / 1000.0;  // メートル単位に変換
+
+        // 過去の距離データを更新
+        kyori5 = kyori4; kyori4 = kyori3; kyori3 = kyori2; kyori2 = kyori1; kyori1 = range;
+
+        // 測定をリセットする場合の処理
+        if (M5.BtnA.wasPressed()) {
+            record = 0;
+            measurementDone = 0;
+            countUP = 0;  // countUPをリセット
+            Serial.println("System reset. Ready for a new measurement.");
+        }
+
+        if (measurementDone == 1) {
+            return;  // 測定が完了している場合は終了
+        }
+
+        // 距離が増加しているか確認
+        if (range > kyori2) {
+            countUP++;
+        } else {
+            countUP = 0;
+        }
+
+        // 6回連続で距離が増加した場合、記録を開始
+        if (countUP > 6 && record == 0) {
+            record = 1;
+            recstartTime = micros();
+            lastDisplayTime = -0.1;  // データ出力のための初期化
+            initialPosition = smoothrange_m;  // 開始時の位置を記録
+            Serial.println("Recording started.");
+        }
+
+        // 記録中の場合の処理
+        if (record == 1) {
+            float time_s = (micros() - recstartTime) / 1000000.0;
+
+            // 最初のデータを0秒に対応させて出力
+            if (lastDisplayTime < 0.0) {
+                Serial.print("0.00,");
+                Serial.println(initialPosition, 2);
+                lastDisplayTime = 0.0;
+            } else if (time_s >= lastDisplayTime + 0.1 && lastDisplayTime <= 1.0) {
+                Serial.print(lastDisplayTime + 0.1, 2);
+                Serial.print(",");
+                Serial.println(smoothrange_m, 2);
+                lastDisplayTime += 0.1;
+            }
+
+            // 記録が1000ms（1秒）を超えたら停止
+            if (micros() - recstartTime > 1100000) {
+                record = 0;
+                measurementDone = 1;
+                countUP = 0;  // countUPをリセットして再測定を防止
+                Serial.println("Recording stopped.");
+            }
+        }
+    }
+
+    M5.update();  // ボタン入力の更新
+}
